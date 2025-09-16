@@ -755,5 +755,16 @@
                 }
             ]
         }
+    ],
+    "types": [
+        {
+            "name": "OptionBool",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    "bool"
+                ]
+            }
+        }
     ]
 }

@@ -756,7 +756,73 @@
             ]
         }
     ],
+    "accounts": [
+        {
+            "name": "Pool",
+            "discriminator": [
+                241,
+                154,
+                109,
+                4,
+                17,
+                177,
+                109,
+                188
+            ]
+        }
+    ],
     "types": [
+        {
+            "name": "Pool",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "pool_bump",
+                        "type": "u8"
+                    },
+                    {
+                        "name": "index",
+                        "type": "u16"
+                    },
+                    {
+                        "name": "creator",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "base_mint",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "quote_mint",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "lp_mint",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "pool_base_token_account",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "pool_quote_token_account",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "lp_supply",
+                        "docs": [
+                            "True circulating supply without burns and lock-ups"
+                        ],
+                        "type": "u64"
+                    },
+                    {
+                        "name": "coin_creator",
+                        "type": "pubkey"
+                    }
+                ]
+            }
+        },
         {
             "name": "OptionBool",
             "type": {

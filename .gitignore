@@ -6,3 +6,9 @@ node_modules
 test-ledger
 .yarn
 .env
+# 忽略 VSCode 本地缓存
+.vscode/*
+# 但保留推荐的配置
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json

@@ -29,8 +29,14 @@ export async function fetchPoolViaTypes(
       throw new Error(`Discriminator mismatch for Pool at ${poolPk.toBase58()}`);
     }
   }
-  // 用 "types" 里的 Pool 结构解码（去掉前 8 字节）
-  const decoded: any = (pamm.coder as any).types.decode("Pool", ai.data.slice(8));
+  // 注意anchor的驼峰转换
+  console.log("pamm.programId:", pamm.programId.toBase58());
+  console.log("IDL accounts:", (pamm.idl as any).accounts?.map((a: any) => a.name));
+  console.log("IDL types:", (pamm.idl as any).types?.map((t: any) => t.name));
+
+  // 用 "types" 里的 Pool 结构解码（去掉前 8 字节）.注意Anchor对大小写的转化
+  const decoded: any = (pamm.coder as any).types.decode("pool", ai.data.slice(8));
+  console.log("POOL properties are ", decoded);
 
   // 返回 camelCase 字段
   return {

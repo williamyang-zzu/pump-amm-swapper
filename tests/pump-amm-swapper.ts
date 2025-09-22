@@ -2,8 +2,10 @@ import * as anchor from "@coral-xyz/anchor";
 import { AnchorProvider, BN, Program, web3 } from "@coral-xyz/anchor";
 import {
   getAssociatedTokenAddressSync,
+  getOrCreateAssociatedTokenAccount,
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
+  createSyncNativeInstruction,            // 🔶 新增
 } from "@solana/spl-token";
 import { PumpAmmSwapper } from "../target/types/pump_amm_swapper";
 
@@ -14,6 +16,9 @@ import PAMM_IDL from "../idls/pump_amm.json";
 // ======  ⬇️⬇️⬇️  ======
 import { fetchPoolViaTypes } from "./utils";
 // ======  ⬆️⬆️⬆️  ======
+
+import * as dotenv from "dotenv";
+dotenv.config();
 
 /* 其余常量保持不变 */
 const PAMM_PROGRAM_ID = new web3.PublicKey(
@@ -30,9 +35,12 @@ const PROXY_PROGRAM_ID = process.env.PROXY_PROGRAM_ID
   ? new web3.PublicKey(process.env.PROXY_PROGRAM_ID)
   : new web3.PublicKey("7vbo8W8myMRKZRogqsF5u4RwZtUhN7BaFJR41StrhPkU");
 
+// Useless-WSOL
 const POOL = process.env.POOL
   ? new web3.PublicKey(process.env.POOL)
-  : new web3.PublicKey("<POOL_PUBKEY>");
+  : new web3.PublicKey("kV16LmKrpP1vnNkRhHYcGz2MpGfQ2jVF89WPtWnMpRS");
+
+console.log("print Useless coin on Pump: ", POOL);
 
 anchor.setProvider(AnchorProvider.env());
 const provider = AnchorProvider.env();
@@ -104,17 +112,66 @@ function withPriorityFee(
   );
 }
 
+// 🔶🔶🔶 新增：确保 user 的 WSOL 余额 >= 需要的 lamports
+async function ensureWrappedSol(
+  amountLamports: bigint | number,                // 需要准备的 WSOL 金额（单位：lamports）
+  owner: web3.PublicKey,
+) {
+  // 1) 创建/拿到 WSOL ATA
+  const wsolMint = new web3.PublicKey("So11111111111111111111111111111111111111112");
+  const ataAcc = await getOrCreateAssociatedTokenAccount(
+    connection,
+    wallet.payer,         // 费用支付者
+    wsolMint,
+    owner,
+    false,
+    "confirmed",
+    {},
+    TOKEN_PROGRAM_ID
+  );
+
+  // 2) 看看当前 WSOL 余额是否足够
+  //   amount 是 spl-token 的 u64；我们只关心够不够，不够就补齐
+  const need = typeof amountLamports === "bigint" ? amountLamports : BigInt(amountLamports);
+  const have = BigInt(ataAcc.amount.toString());
+
+  if (have < need) {
+    const delta = need - have;
+
+    // 3) 把本地钱包的 SOL 转到 WSOL ATA，然后 syncNative
+    const tx = new web3.Transaction().add(
+      web3.SystemProgram.transfer({
+        fromPubkey: wallet.publicKey,
+        toPubkey: ataAcc.address,
+        lamports: Number(delta),
+      }),
+      createSyncNativeInstruction(ataAcc.address)  // 同步，把 lamports 变成 WSOL 余额
+    );
+    await anchor.web3.sendAndConfirmTransaction(connection, tx, [wallet.payer], {
+      skipPreflight: true,
+      commitment: "confirmed",
+    });
+  }
+
+  return ataAcc.address;
+}
+
+
 // 🔶🔶🔶 【替换：加载 Pool 字段 | 高亮修改】
 // ======  ⬇️⬇️⬇️  ======
 async function loadPoolFields(poolPk: web3.PublicKey) {
   // 原来：const pool = await pamm.account.pool.fetch(poolPk);
   // 现在：通过 types 解码（保持官方 IDL 不变）
   const pool = await fetchPoolViaTypes(provider, pamm, poolPk);
+  console.log("print Useless coin pool on Pump: ", pool);
 
   // 这里的 globalConfig / protocolFeeRecipient 不在 Pool 结构里，
   // 请通过环境变量或你掌握的来源注入（示例用 env）
   const gc = process.env.PAMM_GLOBAL_CONFIG;
   const pr = process.env.PAMM_FEE_RECIPIENT;
+  console.log("print PAMM_GLOBAL_CONFIG: ", gc);
+  console.log("print PAMM_FEE_RECIPIENT: ", pr);
+
   if (!gc || !pr) {
     throw new Error(
       "缺少 PAMM_GLOBAL_CONFIG 或 PAMM_FEE_RECIPIENT 环境变量，请提供全局配置与手续费接收地址。"
@@ -156,20 +213,38 @@ async function buyAmm(
   const baseTokenProgram = await tokenProgramForMint(baseMint);
   const quoteTokenProgram = await tokenProgramForMint(quoteMint);
 
-  const userBaseATA = getAssociatedTokenAddressSync(
+  // 🔶 修改：用户 ATA 用 getOrCreateAssociatedTokenAccount（会在不存在时自动创建）
+  const userBaseATAAcc = await getOrCreateAssociatedTokenAccount(
+    connection,
+    wallet.payer,       // 费用支付者（本地 NodeWallet 有 payer）
     baseMint,
     user,
     false,
-    baseTokenProgram,
-    ATA_PROGRAM_ID
+    "confirmed",
+    {},
+    baseTokenProgram
   );
-  const userQuoteATA = getAssociatedTokenAddressSync(
+  const userBaseATA = userBaseATAAcc.address; // 传账户地址即可
+
+  // 🔶 修改：用户的 quote ATA 同理
+  const userQuoteATAAcc = await getOrCreateAssociatedTokenAccount(
+    connection,
+    wallet.payer,
     quoteMint,
     user,
     false,
-    quoteTokenProgram,
-    ATA_PROGRAM_ID
+    "confirmed",
+    {},
+    quoteTokenProgram
   );
+  const userQuoteATA = userQuoteATAAcc.address;
+
+  // 🔶🔶🔶 新增：如果 quoteMint 是 WSOL，则在 BUY 前把 maxQuoteIn 金额的 SOL 包成 WSOL
+  if (quoteMint.equals(new web3.PublicKey("So11111111111111111111111111111111111111112"))) {
+    // maxQuoteIn 是 BN，把它转成 bigint（lamports）
+    await ensureWrappedSol(BigInt(maxQuoteIn.toString()), user);
+  }
+
   const protocolFeeRecipientATA = getAssociatedTokenAddressSync(
     quoteMint,
     protocolFeeRecipient,
@@ -200,6 +275,7 @@ async function buyAmm(
   const preIxs: web3.TransactionInstruction[] = [];
   withPriorityFee(preIxs);
 
+  console.log("before buyAMM######");
   const sig = await proxy.methods
     .buy(baseAmountOut, maxQuoteIn, trackVolume)
     .accounts({
@@ -220,7 +296,7 @@ async function buyAmm(
       // systemProgram: web3.SystemProgram.programId,
       // associatedTokenProgram: ATA_PROGRAM_ID,
       eventAuthority: ea,
-      // program: PAMM_PROGRAM_ID,
+      program: PAMM_PROGRAM_ID,
       coinCreatorVaultAta: creatorVaultATA,
       coinCreatorVaultAuthority: creatorVaultAuth,
       globalVolumeAccumulator: gva,
@@ -255,20 +331,31 @@ async function sellAmm(
   const baseTokenProgram = await tokenProgramForMint(baseMint);
   const quoteTokenProgram = await tokenProgramForMint(quoteMint);
 
-  const userBaseATA = getAssociatedTokenAddressSync(
+  // 🔶 修改：同 BUY，自动创建用户两个 ATA
+  const userBaseATAAcc = await getOrCreateAssociatedTokenAccount(
+    connection,
+    wallet.payer,
     baseMint,
     user,
     false,
-    baseTokenProgram,
-    ATA_PROGRAM_ID
+    "confirmed",
+    {},
+    baseTokenProgram
   );
-  const userQuoteATA = getAssociatedTokenAddressSync(
+  const userBaseATA = userBaseATAAcc.address;
+
+  const userQuoteATAAcc = await getOrCreateAssociatedTokenAccount(
+    connection,
+    wallet.payer,
     quoteMint,
     user,
     false,
-    quoteTokenProgram,
-    ATA_PROGRAM_ID
+    "confirmed",
+    {},
+    quoteTokenProgram
   );
+  const userQuoteATA = userQuoteATAAcc.address;
+
   const protocolFeeRecipientATA = getAssociatedTokenAddressSync(
     quoteMint,
     protocolFeeRecipient,
@@ -311,7 +398,7 @@ async function sellAmm(
       // systemProgram: web3.SystemProgram.programId,
       // associatedTokenProgram: ATA_PROGRAM_ID,
       eventAuthority: ea,
-      // program: PAMM_PROGRAM_ID,
+      program: PAMM_PROGRAM_ID,
       coinCreatorVaultAta: creatorVaultATA,
       coinCreatorVaultAuthority: creatorVaultAuth,
       feeConfig: feeCfg,
@@ -340,7 +427,8 @@ describe("pump-amm-swapper", () => {
       throw new Error("请把 <POOL_PUBKEY> 替换为真实池子地址，或通过 env 变量 POOL 传入。");
     }
     const baseIn = new BN(process.env.BASE_IN ?? "500000");
-    const minQuoteOut = new BN(process.env.MIN_QUOTE_OUT ?? "2000000");
+    // const minQuoteOut = new BN(process.env.MIN_QUOTE_OUT ?? "2000000");
+    const minQuoteOut = new BN(process.env.MIN_QUOTE_OUT ?? "0"); // 🔶 修改：避免 ExceededSlippage
     const sig = await sellAmm(POOL, baseIn, minQuoteOut);
     console.log("SELL tx:", sig);
   });
